@@ -25,9 +25,8 @@ class AgentLlmEngine(private val context: Context) {
     companion object {
         private const val TAG = "AgentLlmEngine"
         private const val MAX_ITERATIONS = 30
-        private const val SCREEN_SETTLE_DELAY = 800L
+        private const val SCREEN_SETTLE_DELAY = 600L
         private const val MAX_HISTORY_MESSAGES = 20
-        private const val LLM_MAX_RETRIES = 2
 
         private const val SYSTEM_PROMPT = """You are Krinry, a powerful AI phone assistant with FULL device control. You control the phone through AccessibilityService. You respond ONLY in JSON.
 
@@ -154,29 +153,20 @@ One JSON object per response."""
             // 3. Hindi status
             onStatusUpdate?.invoke("🤔 Soch raha hoon... (step $iteration)")
 
-            // 4. LLM call with retry
-            var llmResponse: String? = null
-            var lastError: Exception? = null
-            for (retry in 0..LLM_MAX_RETRIES) {
-                if (!isActive) return
-                try {
-                    llmResponse = GroqApiClient.agentChat(context, SYSTEM_PROMPT, conversationHistory, userMessage)
-                    if (llmResponse != null) break
-                } catch (e: Exception) {
-                    lastError = e
-                    Log.w(TAG, "LLM attempt ${retry + 1} failed: ${e.message}")
-                    if (retry < LLM_MAX_RETRIES) {
-                        onStatusUpdate?.invoke("🔄 Retry ${retry + 1}... server busy")
-                        delay(1500L * (retry + 1)) // Progressive backoff
-                    }
-                }
+            // 4. LLM call (GroqApiClient handles retries internally)
+            onStatusUpdate?.invoke("⚡ Calling AI...")
+            val llmResponse = try {
+                GroqApiClient.agentChat(context, SYSTEM_PROMPT, conversationHistory, userMessage)
+            } catch (e: Exception) {
+                Log.e(TAG, "LLM call failed: ${e.message}")
+                onStatusUpdate?.invoke("❌ ${e.message?.take(50) ?: "Server error"}")
+                ttsManager.speak("Server se jawab nahi aaya.")
+                return
             }
 
             if (llmResponse == null) {
-                val errMsg = lastError?.message?.take(60) ?: "No response"
-                Log.e(TAG, "LLM failed after retries: $errMsg")
-                onStatusUpdate?.invoke("❌ Server error: $errMsg")
-                ttsManager.speak("Server se jawab nahi aaya. Phir try karo.")
+                onStatusUpdate?.invoke("❌ Empty response from server")
+                ttsManager.speak("Server ne koi jawab nahi diya.")
                 return
             }
 
