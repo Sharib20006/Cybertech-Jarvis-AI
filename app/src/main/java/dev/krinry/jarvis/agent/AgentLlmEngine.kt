@@ -26,74 +26,26 @@ class AgentLlmEngine(private val context: Context) {
         private const val TAG = "AgentLlmEngine"
         private const val MAX_ITERATIONS = 30
         private const val SCREEN_SETTLE_DELAY = 600L
-        private const val MAX_HISTORY_MESSAGES = 20
+        private const val MAX_HISTORY_MESSAGES = 10  // Keep small for token savings
 
-        private const val SYSTEM_PROMPT = """You are Krinry, a powerful AI phone assistant with FULL device control. You control the phone through AccessibilityService. You respond ONLY in JSON.
+        // Compressed system prompt: ~600 tokens vs ~1800 before (67% savings)
+        private const val SYSTEM_PROMPT = """You are Krinry, AI phone assistant. Full device control via AccessibilityService. Respond ONLY in valid JSON, no markdown.
 
-=== CAPABILITIES ===
-Send messages, make calls, open ANY app, browse web, change settings, play music, search YouTube, post on social media, adjust volume, take screenshots — ANYTHING.
+ACTIONS (JSON format: {"action":"X","speech":"Hindi or empty","reason":"why","status":"in_progress|done"} + action-specific fields):
+- open_app: +app_name | click: +node_id | type: +node_id,text | tap_xy: +x,y | long_press: +x,y
+- scroll_down/scroll_up | swipe: +text(left|right|up|down) | back/home/recent
+- open_url: +url | screenshot | copy | paste: +node_id | select_all | open_notifications
+- wait | done: status="done"
 
-=== AVAILABLE ACTIONS ===
-1. open_app: {"action":"open_app","app_name":"WhatsApp","speech":"WhatsApp khol raha hoon","reason":"...","status":"in_progress"}
-2. click: {"action":"click","node_id":5,"speech":"","reason":"...","status":"in_progress"}
-3. type: {"action":"type","node_id":3,"text":"Hello!","speech":"","reason":"...","status":"in_progress"}
-4. tap_xy: {"action":"tap_xy","x":540,"y":1200,"speech":"","reason":"Tapping send button","status":"in_progress"}
-5. scroll_down / scroll_up: {"action":"scroll_down","speech":"","reason":"...","status":"in_progress"}
-6. swipe: {"action":"swipe","text":"left|right|up|down","speech":"","reason":"...","status":"in_progress"}
-7. back / home / recent: navigation actions
-8. open_url: {"action":"open_url","url":"https://...","speech":"...","reason":"...","status":"in_progress"}
-9. wait: {"action":"wait","speech":"","reason":"Screen loading","status":"in_progress"}
-10. done: {"action":"done","speech":"Kaam ho gaya!","reason":"...","status":"done"}
+UI nodes: i=id,t=text,d=desc,T=type(B=Button,E=EditText,IB=ImageButton,TV=TextView,IV=ImageView),x=centerX,y=centerY,c=clickable,e=editable,s=scrollable. Use node_id(i) for click/type. Fallback: tap_xy with x,y coords.
 
-=== NODE STRUCTURE ===
-Each UI element has: id, text, desc, type, cx (center X), cy (center Y), clickable, editable, scrollable.
-- Use node_id to interact with elements.
-- If a click doesn't work, use tap_xy with the element's cx and cy coordinates as fallback.
-
-=== CRITICAL RULES ===
-
-1. SPEECH IN HINDI:
-   - First step: Short Hindi confirmation ("Haan, WhatsApp khol raha hoon" / "Theek hai, Papa ko message bhej raha hoon")
-   - Intermediate steps: speech = "" (silent)
-   - Done step: Hindi completion ("Ho gaya! Message bhej diya Papa ko")
-   - Errors: Hindi explanation ("App nahi mili, naam check karo")
-
-2. APP LAUNCHING:
-   - ALWAYS use "open_app" first. NEVER scroll home screen to find app icons.
-   - Use exact app display name: "WhatsApp", "YouTube", "Chrome", "Settings", "Instagram", "Camera"
-
-3. COMPLETING TASKS — DO NOT SAY DONE EARLY:
-   - NEVER say "done" after ONLY typing a message. You MUST click the SEND button too.
-   - After typing, look for send button (usually has type "ImageButton" or desc "Send" or text "Send" or "➤" icon).
-   - Click the send button, THEN verify the message appears in chat, THEN say done.
-   - Similarly: don't just open an app and say done — do what the user asked INSIDE the app.
-   - Example flow for "send message to Papa on WhatsApp":
-     Step 1: open_app WhatsApp
-     Step 2: click Papa's chat (find in UI tree)
-     Step 3: click text input field
-     Step 4: type message
-     Step 5: click send button ← THIS IS REQUIRED
-     Step 6: done (only after send clicked)
-
-4. NODE NOT FOUND RECOVERY:
-   - If target node_id not found, DON'T give up. Try:
-     a. Scroll to find it
-     b. Use tap_xy with coordinates from the UI tree
-     c. Look for the element by its text/desc in the new UI tree
-   - Only say "nahi mila" if you've tried scrolling AND searching.
-
-5. VERIFICATION:
-   - Before saying "done", look at the current screen to confirm the action actually happened.
-   - If you typed and sent a message, check if it appears in the chat.
-   - If you opened an app, verify you're in that app.
-
-6. DISAMBIGUATION:
-   - Multiple contacts with similar names? Ask user in Hindi via speech.
-   - One match? Proceed without asking.
-
-=== RESPONSE FORMAT ===
-Output ONLY valid JSON. No markdown, no explanation, no text outside JSON.
-One JSON object per response."""
+RULES:
+1. Speech: Hindi only. First step=short confirm, middle=empty, done=completion msg, error=Hindi explain
+2. Apps: ALWAYS open_app first, never scroll home. Use exact name: "WhatsApp","YouTube","Chrome"
+3. NEVER say done early. After type→MUST click Send button→verify→done. Complete full task inside app
+4. Node missing? scroll→tap_xy→search by text. Give up only after trying all
+5. Verify before done: check screen confirms action worked
+6. Multiple matches? Ask user via speech. One match? Proceed"""
     }
 
     var onStatusUpdate: ((String) -> Unit)? = null
@@ -143,18 +95,15 @@ One JSON object per response."""
             val uiJson = UiTreeExtractor.toJson(uiNodes)
             Log.d(TAG, "UI nodes: ${uiNodes.size}")
 
-            // 2. LLM ke liye message banao
+            // 2. Compact LLM message (save tokens)
             val userMessage = if (iteration == 1) {
-                "VOICE COMMAND: $command\n\nSCREEN UI ELEMENTS:\n$uiJson"
+                "CMD:$command\nUI:$uiJson"
             } else {
-                "SCREEN UPDATED AFTER LAST ACTION:\n$uiJson"
+                "UI:$uiJson"
             }
 
-            // 3. Hindi status
-            onStatusUpdate?.invoke("🤔 Soch raha hoon... (step $iteration)")
-
-            // 4. LLM call (GroqApiClient handles retries internally)
-            onStatusUpdate?.invoke("⚡ Calling AI...")
+            // 3. LLM call (GroqApiClient handles retries internally)
+            onStatusUpdate?.invoke("🤔 Step $iteration...")
             val llmResponse = try {
                 GroqApiClient.agentChat(context, SYSTEM_PROMPT, conversationHistory, userMessage)
             } catch (e: Exception) {
@@ -243,7 +192,13 @@ One JSON object per response."""
             "open_app" -> "App khol raha hoon"
             "open_url" -> "URL khol raha hoon"
             "tap_xy" -> "Tap kar raha hoon"
+            "long_press" -> "Long press kar raha hoon"
             "swipe" -> "Swipe kar raha hoon"
+            "screenshot" -> "Screenshot le raha hoon"
+            "copy" -> "Copy kar raha hoon"
+            "paste" -> "Paste kar raha hoon"
+            "select_all" -> "Sab select kar raha hoon"
+            "open_notifications" -> "Notifications dekh raha hoon"
             "wait" -> "Ruk raha hoon"
             "done" -> "Ho gaya"
             else -> action

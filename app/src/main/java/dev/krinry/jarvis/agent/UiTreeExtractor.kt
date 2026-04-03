@@ -3,8 +3,6 @@ package dev.krinry.jarvis.agent
 import android.graphics.Rect
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
-import org.json.JSONArray
-import org.json.JSONObject
 
 /**
  * UiTreeExtractor — Parses the current screen's AccessibilityNodeInfo tree
@@ -17,7 +15,13 @@ object UiTreeExtractor {
 
     private const val TAG = "UiTreeExtractor"
     private const val MAX_DEPTH = 15
-    private const val MAX_NODES = 120
+    private const val MAX_NODES = 150  // Increased for complex screens
+
+    // Types to skip even if they have content (purely decorative)
+    private val SKIP_TYPES = setOf(
+        "View", "FrameLayout", "LinearLayout", "RelativeLayout",
+        "ConstraintLayout", "CardView", "CoordinatorLayout"
+    )
 
     data class UiNode(
         val id: Int,
@@ -71,6 +75,9 @@ object UiTreeExtractor {
             )
 
             if (hasSize && (hasContent || isActionable || isImportant)) {
+                // Skip decorative containers unless they are clickable/actionable
+                val isDecorativeContainer = className in SKIP_TYPES && !isActionable && !hasContent
+                if (!isDecorativeContainer) {
                 nodes.add(
                     UiNode(
                         id = idCounter++,
@@ -86,6 +93,7 @@ object UiTreeExtractor {
                         nodeInfo = node
                     )
                 )
+                }
             }
 
             // Traverse children
@@ -112,29 +120,56 @@ object UiTreeExtractor {
     }
 
     /**
-     * Convert UI nodes to a compact JSON string for the LLM.
-     * Includes bounds as [x, y] center point for gesture fallback.
+     * Ultra-compact JSON for LLM — minimizes token usage.
+     * Short keys: i=id, t=text, d=desc, T=type, x=centerX, y=centerY
+     * Only includes non-empty/non-default fields.
+     * ~40-60% smaller than verbose JSON.
      */
     fun toJson(nodes: List<UiNode>): String {
-        val array = JSONArray()
+        val sb = StringBuilder("[")
+        var first = true
         for (node in nodes) {
-            val obj = JSONObject().apply {
-                put("id", node.id)
-                if (node.text.isNotEmpty()) put("text", node.text)
-                if (node.contentDescription.isNotEmpty()) put("desc", node.contentDescription)
-                put("type", node.className)
-                // Center coordinates for gesture-based tap
-                put("cx", node.bounds.centerX())
-                put("cy", node.bounds.centerY())
-                if (node.clickable) put("clickable", true)
-                if (node.editable) put("editable", true)
-                if (node.scrollable) put("scrollable", true)
-                if (node.checked != null) put("checked", node.checked)
-                if (node.focused) put("focused", true)
+            if (!first) sb.append(",")
+            first = false
+
+            sb.append("{\"i\":").append(node.id)
+
+            val text = node.text.take(50)
+            if (text.isNotEmpty()) sb.append(",\"t\":\"").append(escapeJson(text)).append("\"")
+
+            val desc = node.contentDescription.take(50)
+            if (desc.isNotEmpty()) sb.append(",\"d\":\"").append(escapeJson(desc)).append("\"")
+
+            // Only include type if it's useful
+            val shortType = when (node.className) {
+                "Button" -> "B"
+                "EditText" -> "E"
+                "ImageButton" -> "IB"
+                "TextView" -> "TV"
+                "ImageView" -> "IV"
+                "CheckBox" -> "CB"
+                "Switch" -> "SW"
+                "RecyclerView" -> "RV"
+                else -> node.className.take(10)
             }
-            array.put(obj)
+            sb.append(",\"T\":\"").append(shortType).append("\"")
+            sb.append(",\"x\":").append(node.bounds.centerX())
+            sb.append(",\"y\":").append(node.bounds.centerY())
+
+            // Only actionable flags that are true
+            if (node.clickable) sb.append(",\"c\":1")
+            if (node.editable) sb.append(",\"e\":1")
+            if (node.scrollable) sb.append(",\"s\":1")
+            if (node.checked != null) sb.append(",\"ck\":").append(if (node.checked) 1 else 0)
+
+            sb.append("}")
         }
-        return array.toString()
+        sb.append("]")
+        return sb.toString()
+    }
+
+    private fun escapeJson(s: String): String {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace("\r", "")
     }
 
     /**
