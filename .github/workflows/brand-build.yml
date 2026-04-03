@@ -1,0 +1,152 @@
+name: Brand Build APK
+
+on:
+  workflow_dispatch:
+    description: 'Build APK with branding from branding/ folder'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      # Read branding config
+      - name: Read Branding Config
+        id: config
+        run: |
+          # Read values from config file (ignore comments and empty lines)
+          APP_NAME=$(grep '^APP_NAME=' branding/config.txt | cut -d'=' -f2-)
+          PACKAGE_NAME=$(grep '^PACKAGE_NAME=' branding/config.txt | cut -d'=' -f2-)
+          VERSION_NAME=$(grep '^VERSION_NAME=' branding/config.txt | cut -d'=' -f2-)
+          VERSION_CODE=$(grep '^VERSION_CODE=' branding/config.txt | cut -d'=' -f2-)
+          MIN_SDK=$(grep '^MIN_SDK=' branding/config.txt | cut -d'=' -f2-)
+          TARGET_SDK=$(grep '^TARGET_SDK=' branding/config.txt | cut -d'=' -f2-)
+          ACCESSIBILITY_LABEL=$(grep '^ACCESSIBILITY_LABEL=' branding/config.txt | cut -d'=' -f2-)
+          ACCESSIBILITY_DESC=$(grep '^ACCESSIBILITY_DESC=' branding/config.txt | cut -d'=' -f2-)
+
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "package_name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "min_sdk=$MIN_SDK" >> $GITHUB_OUTPUT
+          echo "target_sdk=$TARGET_SDK" >> $GITHUB_OUTPUT
+          echo "accessibility_label=$ACCESSIBILITY_LABEL" >> $GITHUB_OUTPUT
+          echo "accessibility_desc=$ACCESSIBILITY_DESC" >> $GITHUB_OUTPUT
+
+          echo "=== Branding Configuration ==="
+          echo "App Name: $APP_NAME"
+          echo "Package: $PACKAGE_NAME"
+          echo "Version: $VERSION_NAME ($VERSION_CODE)"
+          echo "Min SDK: $MIN_SDK"
+          echo "Target SDK: $TARGET_SDK"
+
+      # Update build.gradle.kts
+      - name: Update build.gradle.kts
+        run: |
+          sed -i "s|namespace = \"dev.krinry.jarvis\"|namespace = \"${{ steps.config.outputs.package_name }}\"|g" app/build.gradle.kts
+          sed -i "s|applicationId = \"dev.krinry.jarvis\"|applicationId = \"${{ steps.config.outputs.package_name }}\"|g" app/build.gradle.kts
+          sed -i "s|versionName = \"1.0\"|versionName = \"${{ steps.config.outputs.version_name }}\"|g" app/build.gradle.kts
+          sed -i "s|versionCode = 1|versionCode = ${{ steps.config.outputs.version_code }}|g" app/build.gradle.kts
+          sed -i "s|minSdk = 24|minSdk = ${{ steps.config.outputs.min_sdk }}|g" app/build.gradle.kts
+          sed -i "s|targetSdk = 36|targetSdk = ${{ steps.config.outputs.target_sdk }}|g" app/build.gradle.kts
+
+      # Update strings.xml
+      - name: Update strings.xml
+        run: |
+          # Escape special characters for sed
+          ESCAPED_DESC=$(echo '${{ steps.config.outputs.accessibility_desc }}' | sed 's/[&/\]/\\&/g')
+          ESCAPED_NAME=$(echo '${{ steps.config.outputs.app_name }}' | sed 's/[&/\]/\\&/g')
+          
+          sed -i "s|<string name=\"app_name\">Jarvis</string>|<string name=\"app_name\">$ESCAPED_NAME</string>|g" app/src/main/res/values/strings.xml
+          sed -i "s|<string name=\"accessibility_service_description\">Enable Jarvis to automatically perform actions and navigate apps on your behalf.</string>|<string name=\"accessibility_service_description\">$ESCAPED_DESC</string>|g" app/src/main/res/values/strings.xml
+
+      # Update Kotlin package declarations
+      - name: Update package in Kotlin files
+        run: |
+          find app/src/main/java -name "*.kt" -exec sed -i "s|package dev.krinry.jarvis|package ${{ steps.config.outputs.package_name }}|g" {} +
+          find app/src/main/java -name "*.kt" -exec sed -i "s|import dev.krinry.jarvis|import ${{ steps.config.outputs.package_name }}|g" {} +
+
+      # Restructure package directories
+      - name: Restructure package directories
+        run: |
+          OLD_PATH="app/src/main/java/dev/krinry/jarvis"
+          NEW_PATH="app/src/main/java/$(echo ${{ steps.config.outputs.package_name }} | tr '.' '/')"
+          
+          if [ "$OLD_PATH" != "$NEW_PATH" ] && [ -d "$OLD_PATH" ]; then
+            mkdir -p "$NEW_PATH"
+            cp -r "$OLD_PATH"/* "$NEW_PATH"/
+            rm -rf app/src/main/java/dev
+          fi
+
+      # Handle logo if exists
+      - name: Process Logo
+        if: hashFiles('branding/logo.png') != ''
+        run: |
+          echo "Logo found! Processing..."
+          
+          # Remove ALL existing launcher icons (png and webp)
+          find app/src/main/res -name "ic_launcher.png" -delete
+          find app/src/main/res -name "ic_launcher.webp" -delete
+          find app/src/main/res -name "ic_launcher_round.png" -delete
+          find app/src/main/res -name "ic_launcher_round.webp" -delete
+          echo "✓ Removed old icons"
+          
+          # Install required tools
+          sudo apt-get update && sudo apt-get install -y imagemagick
+          
+          # Generate all required icon sizes for mipmap folders
+          for size_info in "ldpi:36" "mdpi:48" "hdpi:72" "xhdpi:96" "xxhdpi:144" "xxxhdpi:192"; do
+            density=$(echo $size_info | cut -d':' -f1)
+            px=$(echo $size_info | cut -d':' -f2)
+            
+            mkdir -p app/src/main/res/mipmap-$density
+            convert branding/logo.png -resize ${px}x${px} app/src/main/res/mipmap-$density/ic_launcher.png
+            echo "✓ Created mipmap-$density/ic_launcher.png (${px}x${px})"
+          done
+          
+          echo "✓ Logo processing complete!"
+        env:
+          MAGICK_THREAD_LIMIT: 1
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: brand-apk-${{ steps.config.outputs.app_name }}
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: brand-${{ github.run_number }}
+          name: ${{ steps.config.outputs.app_name }} v${{ steps.config.outputs.version_name }}
+          files: app/build/outputs/apk/debug/*.apk
+          body: |
+            ## 🎨 Branded Build
+            
+            - **App Name:** ${{ steps.config.outputs.app_name }}
+            - **Package Name:** ${{ steps.config.outputs.package_name }}
+            - **Version:** ${{ steps.config.outputs.version_name }} (${{ steps.config.outputs.version_code }})
+            - **Min SDK:** ${{ steps.config.outputs.min_sdk }}
+            - **Target SDK:** ${{ steps.config.outputs.target_sdk }}
+            - **Build Type:** Debug
+            - **Logo:** ${{ hashFiles('branding/logo.png') != '' && '✅ Custom' || '❌ Default' }}
+            
+            > Built from `branding/config.txt` via GitHub Actions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
