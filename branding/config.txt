@@ -6,10 +6,10 @@
 # =====================================================
 
 # App display name (shown on phone home screen)
-APP_NAME=Jarvis
+APP_NAME=Jarvis-AI
 
 # Application package name (unique identifier)
-PACKAGE_NAME=dev.krinry.jarvis
+PACKAGE_NAME=Sharib.cyberTech.jarvisAi
 
 # Version shown to users (e.g., 1.0, 2.0-beta, 1.5.0)
 VERSION_NAME=1.0
@@ -27,7 +27,7 @@ TARGET_SDK=35
 ACCESSIBILITY_LABEL=Jarvis AutoAgent
 
 # Accessibility service description
-ACCESSIBILITY_DESC=Enable Jarvis to automatically perform actions and navigate apps on your behalf.
+ACCESSIBILITY_DESC=Enable Jarvis to automatically perform actions and navigate apps on your behalf developed by Cyber Tech.
 
 # =====================================================
 # Logo Instructions
